@@ -5,13 +5,14 @@ from fastapi import Body, FastAPI, Request, HTTPException, Depends
 from pydantic import HttpUrl
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Browser
 
+BROWSER_URL = environ.get("BROWSER_URL", "http://127.0.0.1:9222")
+
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
     playwright_driver = await async_playwright().start()
     fastapi_app.state.playwright_driver = playwright_driver
 
-    BROWSER_URL = environ.get("BROWSER_URL", "http://127.0.0.1:9222")
     browser = await playwright_driver.chromium.connect_over_cdp(BROWSER_URL)
     fastapi_app.state.browser = browser
 
