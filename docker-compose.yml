@@ -1,39 +1,80 @@
 name: browser-poc
 
-x-config:
-  app_ports: &app_ports "8000:8000"
-  browser_url: &browser_url "BROWSER_URL=http://browser:9222"
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  SYNC_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  CELERY_BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672//
 
 services:
-  browser:
-    image: cloakhq/cloakbrowser:latest
-    container_name: cloak_browser
-    command: cloakserve
-#    shm_size: 2gb  # use for production (default is 64mb, not enough for chromium)
-    security_opt:
-      - seccomp=unconfined  # to enable chromium sandbox
-    volumes:
-      - cloak_browser_bin:/root/.cloakbrowser
-    healthcheck:
-      test: [
-        "CMD-SHELL",
-        "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9222/json/version')\" || exit 1"
-      ]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 35s
-    restart: unless-stopped
-
   app:
     build: .
     ports:
-      - *app_ports
+      - "${APP_PORT:-8000}:${APP_PORT:-8000}"
     environment:
-      - *browser_url
+      <<: *app-env
+      APP_PORT: ${APP_PORT:-8000}
+    networks:
+      - cloak_net
     depends_on:
-      browser:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
+  worker:
+    build: .
+    command: celery -A service.celery_app:celery worker --loglevel=info --concurrency=1 --without-mingle --without-gossip
+    environment:
+      <<: *app-env
+      BROWSER_NETWORK: ${BROWSER_NETWORK:-cloak_net}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-999}"
+    networks:
+      - cloak_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - cloak_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d browser_poc"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/30-deprecated.conf:ro
+    networks:
+      - cloak_net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
-  cloak_browser_bin:
+  pg_data:
+
+networks:
+  cloak_net:
+    name: ${BROWSER_NETWORK:-cloak_net}
